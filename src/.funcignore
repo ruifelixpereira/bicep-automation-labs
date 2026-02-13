@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.python_packages/
+.env
+.venv/
+env/
+venv/
+
+# Local settings (contains secrets for local dev)
+local.settings.json
+
+# IDE
+.vscode/
+.idea/
+
+# Azure Functions
+bin/
+obj/
