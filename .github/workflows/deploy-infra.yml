@@ -21,28 +21,89 @@ on:
           - staging
           - prod
       template:
-        description: 'Bicep template to deploy'
+        description: 'Bicep stack to deploy'
         required: true
-        default: 'main'
+        default: 'core'
         type: choice
         options:
-          - main
-          - main-appinsights
+          - core
+          - monitoring
+      location:
+        description: 'Azure region for deployment'
+        required: true
+        default: 'swedencentral'
+        type: string
+      resource_group:
+        description: 'Target resource group name'
+        required: true
+        default: 'rg-bicep-labs'
+        type: string
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  AZURE_RESOURCE_GROUP: rg-bicep-labs
-  AZURE_LOCATION: eastus2
-  TEMPLATE_FILE: infra/${{ inputs.template || 'main' }}.bicep
-  PARAMS_FILE: infra/${{ inputs.template || 'main' }}.bicepparam
+  AZURE_RESOURCE_GROUP: ${{ inputs.resource_group || 'rg-bicep-labs' }}
+  AZURE_LOCATION: ${{ inputs.location || 'swedencentral' }}
 
 jobs:
-  validate:
-    name: Validate Bicep
+  # ---------- Detect which stacks have changed (push/PR only) ----------
+  detect-stacks:
+    name: Detect Changed Stacks
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    outputs:
+      stacks: ${{ steps.filter.outputs.stacks }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine affected stacks
+        id: filter
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE=${{ github.event.pull_request.base.sha }}
+            HEAD=${{ github.event.pull_request.head.sha }}
+          else
+            BASE=${{ github.event.before }}
+            HEAD=${{ github.sha }}
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD" -- infra/)
+          STACKS="[]"
+
+          # Changes in modules/ affect all stacks
+          if echo "$CHANGED" | grep -q '^infra/modules/'; then
+            STACKS='["core","monitoring"]'
+          else
+            ITEMS=()
+            if echo "$CHANGED" | grep -q '^infra/stacks/core/'; then
+              ITEMS+=("core")
+            fi
+            if echo "$CHANGED" | grep -q '^infra/stacks/monitoring/'; then
+              ITEMS+=("monitoring")
+            fi
+            if [[ ${#ITEMS[@]} -gt 0 ]]; then
+              STACKS=$(printf '%s\n' "${ITEMS[@]}" | jq -R . | jq -sc .)
+            fi
+          fi
+
+          echo "stacks=$STACKS" >> "$GITHUB_OUTPUT"
+          echo "Detected stacks: $STACKS"
+
+  # ---------- Validate ----------
+  validate:
+    name: Validate — ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    needs: detect-stacks
+    if: always() && (needs.detect-stacks.result == 'skipped' || fromJson(needs.detect-stacks.outputs.stacks)[0] != null)
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ github.event_name == 'workflow_dispatch' && fromJson(format('["{0}"]', inputs.template)) || fromJson(needs.detect-stacks.outputs.stacks) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,7 +119,7 @@ jobs:
         uses: azure/cli@v2
         with:
           inlineScript: |
-            az bicep build --file ${{ env.TEMPLATE_FILE }}
+            az bicep build --file infra/stacks/${{ matrix.stack }}/main.bicep
 
       - name: Validate deployment
         uses: azure/cli@v2
@@ -66,13 +127,19 @@ jobs:
           inlineScript: |
             az deployment group validate \
               --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-              --template-file ${{ env.TEMPLATE_FILE }} \
-              --parameters ${{ env.PARAMS_FILE }}
+              --template-file infra/stacks/${{ matrix.stack }}/main.bicep \
+              --parameters infra/stacks/${{ matrix.stack }}/main.bicepparam
 
+  # ---------- What-If ----------
   what-if:
-    name: What-If Analysis
+    name: What-If — ${{ matrix.stack }}
     runs-on: ubuntu-latest
-    needs: validate
+    needs: [detect-stacks, validate]
+    if: always() && needs.validate.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ github.event_name == 'workflow_dispatch' && fromJson(format('["{0}"]', inputs.template)) || fromJson(needs.detect-stacks.outputs.stacks) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -90,15 +157,20 @@ jobs:
           inlineScript: |
             az deployment group what-if \
               --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-              --template-file ${{ env.TEMPLATE_FILE }} \
-              --parameters ${{ env.PARAMS_FILE }}
+              --template-file infra/stacks/${{ matrix.stack }}/main.bicep \
+              --parameters infra/stacks/${{ matrix.stack }}/main.bicepparam
 
+  # ---------- Deploy (main branch + workflow_dispatch only) ----------
   deploy:
-    name: Deploy Infrastructure
+    name: Deploy — ${{ matrix.stack }}
     runs-on: ubuntu-latest
-    needs: what-if
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [detect-stacks, what-if]
+    if: always() && needs.what-if.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     environment: ${{ inputs.environment || 'dev' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ github.event_name == 'workflow_dispatch' && fromJson(format('["{0}"]', inputs.template)) || fromJson(needs.detect-stacks.outputs.stacks) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -124,9 +196,9 @@ jobs:
           inlineScript: |
             az deployment group create \
               --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-              --template-file ${{ env.TEMPLATE_FILE }} \
-              --parameters ${{ env.PARAMS_FILE }} \
-              --name "deploy-$(date +%Y%m%d-%H%M%S)"
+              --template-file infra/stacks/${{ matrix.stack }}/main.bicep \
+              --parameters infra/stacks/${{ matrix.stack }}/main.bicepparam \
+              --name "deploy-${{ matrix.stack }}-$(date +%Y%m%d-%H%M%S)"
 
       - name: Show deployment outputs
         uses: azure/cli@v2

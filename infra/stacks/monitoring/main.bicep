@@ -20,7 +20,7 @@ var logAnalyticsName = 'log-${baseName}-${environment}'
 var appInsightsName = 'appi-${baseName}-${environment}'
 
 // ---------- Deploy Application Insights + Log Analytics ----------
-module appInsights 'modules/appInsights.bicep' = {
+module appInsights '../../modules/appInsights.bicep' = {
   params: {
     location: location
     appInsightsName: appInsightsName

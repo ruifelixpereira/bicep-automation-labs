@@ -66,7 +66,7 @@ var storageRoleDefinitions = [
 ]
 
 // ---------- Deploy Key Vault first ----------
-module keyVault 'modules/keyVault.bicep' = {
+module keyVault '../../modules/keyVault.bicep' = {
   params: {
     location: location
     keyVaultName: keyVaultName
@@ -76,7 +76,7 @@ module keyVault 'modules/keyVault.bicep' = {
 }
 
 // ---------- Deploy Function App (depends on Key Vault for URI) ----------
-module functionApp 'modules/functionApp.bicep' = {
+module functionApp '../../modules/functionApp.bicep' = {
   params: {
     location: location
     functionAppName: functionAppName
@@ -87,19 +87,21 @@ module functionApp 'modules/functionApp.bicep' = {
 }
 
 // ---------- Create role assignments on Key Vault for Function App identity ----------
-module keyVaultRoleAssignments 'modules/roleAssignments.bicep' = {
+module keyVaultRoleAssignments '../../modules/roleAssignments.bicep' = {
+  name: 'keyVaultRoleAssignments'
   params: {
     principalId: functionApp.outputs.functionAppPrincipalId
-    keyVaultName: keyVault.outputs.keyVaultName
+    scopeResourceId: keyVault.outputs.keyVaultId
     roleDefinitions: keyVaultRoleDefinitions
   }
 }
 
 // ---------- Create role assignments on Storage Account for Function App identity ----------
-module storageRoleAssignments 'modules/storageRoleAssignments.bicep' = {
+module storageRoleAssignments '../../modules/roleAssignments.bicep' = {
+  name: 'storageRoleAssignments'
   params: {
     principalId: functionApp.outputs.functionAppPrincipalId
-    storageAccountName: functionApp.outputs.storageAccountName
+    scopeResourceId: functionApp.outputs.storageAccountId
     roleDefinitions: storageRoleDefinitions
   }
 }

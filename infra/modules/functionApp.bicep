@@ -91,4 +91,5 @@ output functionAppId string = functionApp.id
 output functionAppName string = functionApp.name
 output functionAppPrincipalId string = functionApp.identity.principalId
 output functionAppDefaultHostName string = functionApp.properties.defaultHostName
+output storageAccountId string = storageAccount.id
 output storageAccountName string = storageAccount.name

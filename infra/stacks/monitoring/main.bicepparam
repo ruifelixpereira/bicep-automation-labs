@@ -1,4 +1,4 @@
-using './main-appinsights.bicep'
+using './main.bicep'
 
 param baseName = 'myapp'
 param environment = 'dev'

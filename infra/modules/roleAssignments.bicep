@@ -1,8 +1,8 @@
-@description('Principal ID of the Function App managed identity')
+@description('Principal ID of the managed identity to assign roles to')
 param principalId string
 
-@description('The Key Vault resource ID to scope the role assignment')
-param keyVaultName string
+@description('Resource ID of the target resource to scope the role assignments')
+param scopeResourceId string
 
 @description('Role assignments to create')
 param roleDefinitions roleDefinitionInfo[]
@@ -16,14 +16,9 @@ type roleDefinitionInfo = {
   description: string
 }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: keyVaultName
-}
-
 resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   for (role, index) in roleDefinitions: {
-    name: guid(keyVault.id, principalId, role.roleDefinitionId)
-    scope: keyVault
+    name: guid(scopeResourceId, principalId, role.roleDefinitionId)
     properties: {
       principalId: principalId
       principalType: 'ServicePrincipal'

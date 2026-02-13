@@ -42,47 +42,52 @@ Infrastructure-as-Code project that deploys an **Azure Function App** and an **A
 .
 ├── .github/
 │   └── workflows/
-│       ├── deploy.yml                   # Infrastructure deployment pipeline
+│       ├── deploy-infra.yml             # Infrastructure deployment pipeline
 │       └── deploy-function.yml          # Function App code deployment pipeline
 ├── src/
-│   ├── function_app.py                  # Python function: list Key Vault keys
+│   ├── function_app.py                  # Python function: list Key Vault keys & secrets
 │   ├── host.json                        # Functions host configuration
 │   ├── requirements.txt                 # Python dependencies
 │   ├── local.settings.json              # Local development settings
 │   └── .funcignore                      # Files to exclude from deployment
 ├── infra/
-│   ├── main.bicep                       # Template 1: Function App + Key Vault + RBAC
-│   ├── main.bicepparam                  # Parameters for main.bicep
-│   ├── main-appinsights.bicep           # Template 2: Application Insights
-│   ├── main-appinsights.bicepparam      # Parameters for main-appinsights.bicep
-│   └── modules/
-│       ├── appInsights.bicep            # App Insights + Log Analytics workspace
-│       ├── keyVault.bicep               # Key Vault resource
-│       ├── functionApp.bicep            # Function App + Plan + Storage
-│       ├── roleAssignments.bicep        # RBAC role assignments on Key Vault
-│       └── storageRoleAssignments.bicep # RBAC role assignments on Storage Account
+│   ├── modules/                         # Reusable Bicep modules
+│   │   ├── appInsights.bicep            # App Insights + Log Analytics workspace
+│   │   ├── keyVault.bicep               # Key Vault resource
+│   │   ├── functionApp.bicep            # Function App + Plan + Storage
+│   │   └── roleAssignments.bicep        # Generic RBAC role assignments (any scope)
+│   └── stacks/                          # Deployable stacks (each has main.bicep + params)
+│       ├── core/
+│       │   ├── main.bicep               # Function App + Key Vault + Storage + RBAC
+│       │   └── main.bicepparam          # Parameters for core stack
+│       └── monitoring/
+│           ├── main.bicep               # Application Insights + Log Analytics
+│           └── main.bicepparam          # Parameters for monitoring stack
+├── setup/
+│   ├── create-app-registration.sh       # Create Azure AD app + service principal + role assignments
+│   └── create-federated-credentials.sh  # Create OIDC federated credentials for GitHub Actions
 └── README.md
 ```
 
-## Templates
+## Stacks
 
-The project contains two independently deployable main templates, selectable via the GitHub Action `template` input:
+The project organizes deployable templates into **stacks** — self-contained directories under `infra/stacks/`, each with its own `main.bicep` and `main.bicepparam`. Stacks share reusable modules from `infra/modules/`.
 
-| Template | File | Description |
+| Stack | Directory | Description |
 |---|---|---|
-| `main` | `infra/main.bicep` | Function App + Key Vault + Storage + RBAC role assignments |
-| `main-appinsights` | `infra/main-appinsights.bicep` | Application Insights + Log Analytics workspace |
+| `core` | `infra/stacks/core/` | Function App + Key Vault + Storage + RBAC role assignments |
+| `monitoring` | `infra/stacks/monitoring/` | Application Insights + Log Analytics workspace |
 
 ## Resources Deployed
 
 | Resource | Type | Description |
 |---|---|---|
 | **Key Vault** | `Microsoft.KeyVault/vaults` | Standard SKU, RBAC authorization enabled, soft-delete (90 days) |
-| **Function App** | `Microsoft.Web/sites` | Linux, .NET 8 isolated runtime, system-assigned managed identity |
+| **Function App** | `Microsoft.Web/sites` | Linux, Python 3.11, system-assigned managed identity |
 | **App Service Plan** | `Microsoft.Web/serverfarms` | Consumption tier (Y1/Dynamic) |
 | **Storage Account** | `Microsoft.Storage/storageAccounts` | Standard LRS, required by the Functions runtime |
-| **Key Vault Role Assignments** | `Microsoft.Authorization/roleAssignments` | Key Vault Secrets User + Key Vault Crypto User + Key Vault Reader, scoped to the Key Vault |
-| **Storage Role Assignments** | `Microsoft.Authorization/roleAssignments` | Blob Data Owner + Queue Data Contributor + File Data Privileged Contributor + Account Contributor, scoped to the Storage Account |
+| **Key Vault Role Assignments** | `Microsoft.Authorization/roleAssignments` | Key Vault Secrets User + Key Vault Crypto User + Key Vault Reader |
+| **Storage Role Assignments** | `Microsoft.Authorization/roleAssignments` | Blob Data Owner + Queue Data Contributor + File Data Privileged Contributor + Account Contributor |
 
 ### `main-appinsights.bicep`
 
@@ -93,7 +98,7 @@ The project contains two independently deployable main templates, selectable via
 
 ## Bicep Modules
 
-### `main.bicep`
+### `stacks/core/main.bicep`
 
 The orchestration file that ties everything together. It accepts a `baseName` and `environment` parameter and derives all resource names using Azure naming conventions:
 
@@ -145,7 +150,17 @@ The Function App uses **Entra ID identity-based authentication** to the Storage 
 
 ### `modules/roleAssignments.bicep`
 
-Creates Azure RBAC role assignments on the Key Vault, granting the Function App's managed identity:
+A **generic, reusable** module that creates Azure RBAC role assignments for any target resource. It accepts a `principalId`, a `scopeResourceId` (used for GUID uniqueness), and an array of `roleDefinitions`. The same module is used for both Key Vault and Storage Account assignments in the core stack.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `principalId` | `string` | Managed identity principal ID |
+| `scopeResourceId` | `string` | Target resource ID (used in assignment GUID for uniqueness) |
+| `roleDefinitions` | `roleDefinitionInfo[]` | Array of role definition IDs and descriptions |
+
+The module exports a `roleDefinitionInfo` user-defined type. To add roles, extend the role definition arrays in the stack's `main.bicep`.
+
+**Key Vault roles (core stack):**
 
 | Role | ID | Purpose |
 |---|---|---|
@@ -153,11 +168,7 @@ Creates Azure RBAC role assignments on the Key Vault, granting the Function App'
 | **Key Vault Crypto User** | `12338af0-0e69-4776-bea7-57ae8d297424` | List and use cryptographic keys in Key Vault |
 | **Key Vault Reader** | `21090545-7ca7-4776-b22c-e363652d74d2` | Read Key Vault metadata (list vaults, properties) |
 
-The module uses a user-defined type (`roleDefinitionInfo`) and a loop to support any number of role assignments. To add more roles, simply extend the `keyVaultRoleDefinitions` array in `main.bicep`.
-
-### `modules/storageRoleAssignments.bicep`
-
-Creates Azure RBAC role assignments on the Storage Account, granting the Function App's managed identity the permissions required for identity-based (keyless) storage access:
+**Storage Account roles (core stack):**
 
 | Role | ID | Purpose |
 |---|---|---|
@@ -165,8 +176,6 @@ Creates Azure RBAC role assignments on the Storage Account, granting the Functio
 | **Storage Queue Data Contributor** | `974c5e8b-45b9-4653-ba55-5f855dd0fb88` | Process queue messages (triggers, bindings, internal scheduling) |
 | **Storage File Data Privileged Contributor** | `69566ab7-960f-475b-8e7c-b3118f30c6bd` | Access file shares (WEBSITE_CONTENTSHARE for deployment artifacts) |
 | **Storage Account Contributor** | `17d1049b-9a84-46fb-8f53-869881c3d3ab` | Manage storage account (content share provisioning on first deploy) |
-
-These four roles are the minimum required for a Consumption-tier Function App to operate with identity-based storage. The module reuses the same `roleDefinitionInfo` type pattern as the Key Vault role assignments module.
 
 ### `modules/appInsights.bicep`
 
@@ -181,16 +190,18 @@ This module is consumed by `main-appinsights.bicep` and can also be referenced f
 
 Bicep resolves dependencies automatically based on module output references:
 
+### `stacks/core/`
+
 ```
 1. Key Vault                    (no dependencies)
 2. Function App                 (depends on Key Vault URI output)
-3. Key Vault Role Assignments   (depends on Function App principal ID + Key Vault name)
-4. Storage Role Assignments     (depends on Function App principal ID + Storage Account name)
+3. Key Vault Role Assignments   (depends on Function App principal ID + Key Vault ID)
+4. Storage Role Assignments     (depends on Function App principal ID + Storage Account ID)
 ```
 
 Steps 3 and 4 run in parallel since they have no dependency on each other.
 
-### `main-appinsights.bicep`
+### `stacks/monitoring/`
 
 ```
 1. Application Insights + Log Analytics   (single module, no external dependencies)
@@ -202,10 +213,10 @@ The project has **two workflows**:
 
 | Workflow | File | Triggers on | Purpose |
 |---|---|---|---|
-| **Deploy Infrastructure** | `deploy.yml` | Changes in `infra/` | Deploys Bicep templates (infrastructure) |
+| **Deploy Infrastructure** | `deploy-infra.yml` | Changes in `infra/` | Deploys Bicep templates (infrastructure) |
 | **Deploy Function App Code** | `deploy-function.yml` | Changes in `src/` | Builds and deploys the Python function code |
 
-### Infrastructure Workflow (`deploy.yml`)
+### Infrastructure Workflow (`deploy-infra.yml`)
 
 Runs a three-stage pipeline:
 
@@ -224,22 +235,31 @@ Runs a three-stage pipeline:
 | **What-If** | Shows a diff of what would change in your Azure environment | Every push & PR |
 | **Deploy** | Creates/updates the resource group and deploys the template | Pushes to `main` only |
 
-### Template Selector
+### Workflow Inputs
 
-The workflow accepts a **`template`** input that determines which Bicep template to deploy:
+On manual dispatch, the workflow accepts four inputs:
+
+| Input | Type | Default | Description |
+|---|---|---|---|
+| `environment` | choice | `dev` | Target environment (`dev`, `staging`, `prod`) |
+| `template` | choice | `core` | Bicep stack to deploy (`core`, `monitoring`) |
+| `location` | string | `swedencentral` | Azure region for the deployment |
+| `resource_group` | string | `rg-bicep-labs` | Target resource group name |
+
+On push/PR triggers all inputs fall back to their defaults (`core` stack, `swedencentral`, `rg-bicep-labs`, `dev`).
+
+### Stack Selector
 
 | Input value | Template file | Parameters file |
 |---|---|---|
-| `main` *(default)* | `infra/main.bicep` | `infra/main.bicepparam` |
-| `main-appinsights` | `infra/main-appinsights.bicep` | `infra/main-appinsights.bicepparam` |
-
-On push/PR triggers the workflow defaults to `main`. On manual dispatch, both the template and environment are selectable from the Actions UI dropdowns.
+| `core` *(default)* | `infra/stacks/core/main.bicep` | `infra/stacks/core/main.bicepparam` |
+| `monitoring` | `infra/stacks/monitoring/main.bicep` | `infra/stacks/monitoring/main.bicepparam` |
 
 ### Triggers
 
 - **Push** to `main` branch (when files in `infra/` change)
 - **Pull request** to `main` branch (when files in `infra/` change) — runs validate + what-if only
-- **Manual dispatch** — select target environment and template from the Actions UI
+- **Manual dispatch** — select target environment, stack, location, and resource group from the Actions UI
 
 ### Authentication
 
@@ -331,7 +351,25 @@ func start
 
 ### 1. Azure AD App Registration
 
-Create an app registration with federated credentials for GitHub Actions:
+Create an app registration with a service principal and role assignments. You can use the provided setup script or run the commands manually.
+
+**Using the setup script (recommended):**
+
+```bash
+# Login to Azure first
+az login
+
+# Create app registration, service principal, and role assignments
+./setup/create-app-registration.sh
+
+# Or with a custom display name
+./setup/create-app-registration.sh "my-custom-app-name"
+```
+
+The script will output the values needed for GitHub secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`).
+
+<details>
+<summary><b>Manual steps (click to expand)</b></summary>
 
 ```bash
 # Create the app registration
@@ -364,9 +402,29 @@ az role assignment create \
 
 > **Note:** The **User Access Administrator** role is required because the deployment creates role assignments on both the Key Vault and the Storage Account.
 
+</details>
+
 ### 2. Federated Credentials
 
-Add federated credentials for GitHub Actions OIDC:
+Add OIDC federated credentials so GitHub Actions can authenticate to Azure without secrets. You can use the provided setup script or run the commands manually.
+
+**Using the setup script (recommended):**
+
+```bash
+# Pass your GitHub repo (owner/repo) — optionally pass the app client ID
+./setup/create-federated-credentials.sh "myorg/bicep-labs"
+
+# Or with an explicit app client ID
+./setup/create-federated-credentials.sh "myorg/bicep-labs" "00000000-0000-0000-0000-000000000000"
+```
+
+The script creates federated credentials for:
+- `main` branch pushes
+- Pull requests
+- `dev`, `staging`, and `prod` environments
+
+<details>
+<summary><b>Manual steps (click to expand)</b></summary>
 
 ```bash
 # For the main branch
@@ -388,6 +446,8 @@ az ad app federated-credential create --id $APP_ID --parameters '{
 
 Replace `<OWNER>/<REPO>` with your GitHub repository (e.g., `myorg/bicep-labs`).
 
+</details>
+
 ### 3. GitHub Repository Secrets
 
 Add these secrets to your GitHub repository (**Settings → Secrets and variables → Actions**):
@@ -398,17 +458,20 @@ Add these secrets to your GitHub repository (**Settings → Secrets and variable
 | `AZURE_TENANT_ID` | Azure AD tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | Target Azure subscription ID |
 
-### 4. Configure Environment Variables
+### 4. Configure Defaults
 
-Update the workflow environment variables in `.github/workflows/deploy.yml`:
+The workflow inputs have sensible defaults that are used for push/PR triggers. To change them, edit the `default` values in `.github/workflows/deploy-infra.yml`:
 
 ```yaml
-env:
-  AZURE_RESOURCE_GROUP: rg-bicep-labs    # Target resource group name
-  AZURE_LOCATION: eastus2               # Azure region
+      location:
+        description: 'Azure region for deployment'
+        default: 'swedencentral'        # Change default region here
+      resource_group:
+        description: 'Target resource group name'
+        default: 'rg-bicep-labs'        # Change default RG here
 ```
 
-Update the parameters in `infra/main.bicepparam`:
+Update the parameters in `infra/stacks/core/main.bicepparam`:
 
 ```bicep
 using './main.bicep'
@@ -425,10 +488,10 @@ Follow these steps to configure the workflow in your GitHub repository:
 
 #### 1. Push the workflow file
 
-The workflow file is already at `.github/workflows/deploy.yml`. Push it to your repository:
+The workflow file is already at `.github/workflows/deploy-infra.yml`. Push it to your repository:
 
 ```bash
-git add .github/workflows/deploy.yml
+git add .github/workflows/deploy-infra.yml
 git commit -m "Add infrastructure deployment workflow"
 git push origin main
 ```
@@ -473,7 +536,7 @@ The workflow authenticates to Azure using OIDC federated credentials. Add these 
 
 1. Go to **Actions → Deploy Infrastructure**
 2. Click **Run workflow** (top right)
-3. Select the **branch**, **environment**, and **template** from the dropdowns
+3. Select the **branch**, **environment**, **stack**, **location**, and **resource group** from the inputs
 4. Click **Run workflow**
 
 The pipeline will execute: **Validate → What-If → Deploy**
@@ -494,9 +557,9 @@ The pipeline will execute: **Validate → What-If → Deploy**
 | `ResourceGroupNotFound` on validate/what-if | The resource group must exist for validation. Create it manually or run the deploy job first (it creates it automatically) |
 | Workflow doesn't trigger on push | Verify files changed are under `infra/**` — the workflow only triggers on that path |
 
-### Adding more Key Vault roles
+### Adding more roles
 
-Edit the `keyVaultRoleDefinitions` array in `infra/main.bicep`:
+Edit the role definition arrays in `infra/stacks/core/main.bicep`. The generic `roleAssignments.bicep` module loops over whatever roles you provide:
 
 ```bicep
 var keyVaultRoleDefinitions = [
@@ -508,10 +571,10 @@ var keyVaultRoleDefinitions = [
     roleDefinitionId: '21090545-7ca7-4776-b22c-e363652d74d2'
     description: 'Allow Function App to read Key Vault metadata'
   }
-  // Add more roles here, e.g. Key Vault Crypto User:
+  // Add more roles here, e.g. Key Vault Certificates Officer:
   // {
-  //   roleDefinitionId: '12338af0-0e69-4776-bea7-57ae8d297424'
-  //   description: 'Allow Function App to perform crypto operations'
+  //   roleDefinitionId: 'a4417e6f-fecd-4de8-b567-7b0420556985'
+  //   description: 'Allow Function App to manage certificates'
   // }
 ]
 ```
