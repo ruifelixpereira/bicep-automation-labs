@@ -1,5 +1,5 @@
 using './main.bicep'
 
-param baseName = 'myapp-core'
+param baseName = 'myapp'
 param environment = 'dev'
 param deploySampleSecret = true
