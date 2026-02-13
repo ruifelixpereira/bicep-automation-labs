@@ -13,12 +13,14 @@ param storageAccountName string
 @description('Key Vault URI for app settings')
 param keyVaultUri string
 
-@description('SKU for the App Service Plan')
-param appServicePlanSku object = {
-  name: 'Y1'
-  tier: 'Dynamic'
-}
+@description('Maximum instance count for Flex Consumption scaling')
+param maximumInstanceCount int = 100
 
+@description('Instance memory in MB for Flex Consumption (2048 or 4096)')
+@allowed([2048, 4096])
+param instanceMemoryMB int = 2048
+
+// ---------- Storage Account ----------
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -33,17 +35,33 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
+// ---------- Blob Services + Deployment Container ----------
+resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobServices
+  name: 'app-package-${toLower(functionAppName)}'
+}
+
+// ---------- App Service Plan (Flex Consumption) ----------
+resource appServicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: appServicePlanName
   location: location
-  sku: appServicePlanSku
+  sku: {
+    tier: 'FlexConsumption'
+    name: 'FC1'
+  }
   kind: 'functionapp'
   properties: {
     reserved: true
   }
 }
 
-resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
+// ---------- Function App (Flex Consumption) ----------
+resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   name: functionAppName
   location: location
   kind: 'functionapp,linux'
@@ -53,30 +71,34 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: appServicePlan.id
     httpsOnly: true
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${storageAccount.properties.primaryEndpoints.blob}${deploymentContainer.name}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      runtime: {
+        name: 'python'
+        version: '3.11'
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: maximumInstanceCount
+        instanceMemoryMB: instanceMemoryMB
+      }
+    }
     siteConfig: {
-      linuxFxVersion: 'Python|3.11'
-      ftpsState: 'Disabled'
-      minTlsVersion: '1.2'
       appSettings: [
         {
           name: 'AzureWebJobsStorage__accountName'
           value: storageAccount.name
         }
         {
-          name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING__accountName'
-          value: storageAccount.name
-        }
-        {
-          name: 'WEBSITE_CONTENTSHARE'
-          value: toLower(functionAppName)
-        }
-        {
           name: 'FUNCTIONS_EXTENSION_VERSION'
           value: '~4'
-        }
-        {
-          name: 'FUNCTIONS_WORKER_RUNTIME'
-          value: 'python'
         }
         {
           name: 'KEY_VAULT_URI'
